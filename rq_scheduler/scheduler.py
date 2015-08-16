@@ -67,6 +67,17 @@ class Scheduler(object):
         signal.signal(signal.SIGINT, stop)
         signal.signal(signal.SIGTERM, stop)
 
+    def _check_scheduled_single(self, func, args, kwargs):
+
+        for job in self.get_jobs():
+            if job.func_name.split('.')[-1] == func.__name__ \
+                    and job.args == args \
+                    and job.kwargs == kwargs \
+                    and job.meta.get('single'):
+                return job
+
+        return None
+
     def _create_job(self, func, args=None, kwargs=None, commit=True,
                     result_ttl=None, queue_name=None):
         """
@@ -128,11 +139,17 @@ class Scheduler(object):
         return self.schedule(scheduled_time, func, args=args, kwargs=kwargs,
                             interval=interval, repeat=repeat)
 
-    def schedule(self, scheduled_time, func, args=None, kwargs=None,
-                interval=None, repeat=None, result_ttl=None, timeout=None, queue_name=None):
+    def schedule(self, scheduled_time, func, args=None, kwargs=None, interval=None, repeat=None, single=False,
+                 result_ttl=None, timeout=None, queue_name=None):
         """
         Schedule a job to be periodically executed, at a certain interval.
         """
+        if single:
+            job = self._check_scheduled_single(func, args=args, kwargs=kwargs)
+            if job:
+                self.log.info('Such job already exists: {}'.format(job))
+                return job
+
         # Set result_ttl to -1 for periodic jobs, if result_ttl not specified
         if interval is not None and result_ttl is None:
             result_ttl = -1
@@ -142,6 +159,8 @@ class Scheduler(object):
             job.meta['interval'] = int(interval)
         if repeat is not None:
             job.meta['repeat'] = int(repeat)
+        if single:
+            job.meta['single'] = True
         if repeat and interval is None:
             raise ValueError("Can't repeat a job without interval argument")
         if timeout is not None:
