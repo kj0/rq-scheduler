@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 class Scheduler(object):
     scheduler_key = 'rq:scheduler'
-    scheduled_jobs_key = 'rq:scheduler:scheduled_jobs'
+    scheduled_jobs_key = scheduler_key + ':scheduled_jobs'
+    scheduled_single_jobs_key = scheduled_jobs_key + ':single'
 
     def __init__(self, queue_name='default', interval=60, connection=None):
         from rq.connections import resolve_connection
@@ -69,11 +70,10 @@ class Scheduler(object):
 
     def _check_scheduled_single(self, func, args, kwargs):
 
-        for job in self.get_jobs():
+        for job in self.get_single_jobs():
             if job.func_name.split('.')[-1] == func.__name__ \
                     and job.args == args \
-                    and job.kwargs == kwargs \
-                    and job.meta.get('single'):
+                    and job.kwargs == kwargs:
                 return job
 
         return None
@@ -94,7 +94,7 @@ class Scheduler(object):
             job.save()
         return job
 
-    def enqueue_at(self, scheduled_time, func, *args, **kwargs):
+    def enqueue_at(self, scheduled_time, func, *args, **kwargs): #todo
         """
         Pushes a job to the scheduler queue. The scheduled queue is a Redis sorted
         set ordered by timestamp - which in this case is job's scheduled execution time.
@@ -117,7 +117,7 @@ class Scheduler(object):
                               job.id)
         return job
 
-    def enqueue_in(self, time_delta, func, *args, **kwargs):
+    def enqueue_in(self, time_delta, func, *args, **kwargs): #todo
         """
         Similar to ``enqueue_at``, but accepts a timedelta instead of datetime object.
         The job's scheduled execution time will be calculated by adding the timedelta
@@ -159,8 +159,6 @@ class Scheduler(object):
             job.meta['interval'] = int(interval)
         if repeat is not None:
             job.meta['repeat'] = int(repeat)
-        if single:
-            job.meta['single'] = True
         if repeat and interval is None:
             raise ValueError("Can't repeat a job without interval argument")
         if timeout is not None:
@@ -169,6 +167,8 @@ class Scheduler(object):
         self.connection._zadd(self.scheduled_jobs_key,
                               to_unix(scheduled_time),
                               job.id)
+        self.connection.sadd(self.scheduled_single_jobs_key,
+                             job.id)
         return job
 
     def enqueue(self, scheduled_time, func, args=None, kwargs=None,
@@ -189,8 +189,10 @@ class Scheduler(object):
         """
         if isinstance(job, Job):
             self.connection.zrem(self.scheduled_jobs_key, job.id)
+            self.connection.srem(self.scheduled_single_jobs_key, job.id)
         else:
             self.connection.zrem(self.scheduled_jobs_key, job)
+            self.connection.srem(self.scheduled_single_jobs_key, job)
 
     def __contains__(self, item):
         """
@@ -253,6 +255,20 @@ class Scheduler(object):
                     jobs.append((job, sched_time))
                 else:
                     jobs.append(job)
+            except NoSuchJobError:
+                # Delete jobs that aren't there from scheduler
+                self.cancel(job_id)
+        return jobs
+
+    def get_single_jobs(self):
+        job_ids = self.connection.smembers(self.scheduled_single_jobs_key)
+
+        jobs = []
+        for job_id in job_ids:
+            job_id = job_id.decode('utf-8')
+            try:
+                job = Job.fetch(job_id, connection=self.connection)
+                jobs.append(job)
             except NoSuchJobError:
                 # Delete jobs that aren't there from scheduler
                 self.cancel(job_id)
@@ -332,3 +348,6 @@ class Scheduler(object):
                 time.sleep(self._interval)
         finally:
             self.register_death()
+
+#todo get_single_jobs -> get_jobs
+#todo pipelines/transactions
